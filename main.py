@@ -17,7 +17,7 @@ device = torch.device("cpu")
 clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
 clip_model.eval()
 
-text_prompt = "tall cone"
+text_prompt = "a tall, narrow object"
 #turn text prompt into tokens that CLIP can understand
 text_tokens = clip.tokenize([text_prompt]).to(device)
 #encode text prompt into feature vector
@@ -27,9 +27,12 @@ with torch.no_grad():
     
 
 # -------------------------------
-# 2. Create mesh (simple sphere)
+# 2. Create mesh (simple cube)
 # -------------------------------
-mesh = trimesh.creation.icosphere(subdivisions=4, radius=1.0)
+mesh = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
+#subdivide to increase vertex count for smoother optimization
+mesh = mesh.subdivide()
+mesh = mesh.subdivide()
 verts = torch.tensor(mesh.vertices, dtype=torch.float32, device=device, requires_grad=True)
 faces = np.array(mesh.faces)
 
@@ -84,16 +87,18 @@ def render_mesh(verts_np, faces_np, elev=30, azim=45, image_size=224):
 #lr = learning rate for vertex updates - controls how much the mesh changes each step 
 optimiser = torch.optim.Adam([verts], lr=3e-3) 
 #number of optimisation steps - more steps allows for better convergence but takes longer
-num_steps = 300
+num_steps = 250
 #weight for Laplacian smoothing
-lambda_smooth = 0.1
+# lambda_smooth = 0.1
+lambda_smooth = max(0.1, 10.0 / num_steps)  #decay smoothing weight over time to allow more deformation later
 
 #multiple camera views (elev, azim) for multi-view CLIP loss
 camera_views = [
-    (30, 45),
-    (30, 135),
-    (30, 225),
-    (30, 315)
+    (0, 0),
+    (0, 90),
+    (0, 180),
+    (0, 270),
+    (75, 45)
 ]
 
 #optimisation loop, 
@@ -118,7 +123,22 @@ for step in range(num_steps):
     #laplacian smoothing loss 
     # - encourages neighboring vertices to stay close, preventing mesh distortion
     smooth_loss = lambda_smooth * torch.trace(verts.t() @ L @ verts)
-    loss_total = avg_loss + smooth_loss
+    
+    #anisotropy loss to encourage one dominant axis
+    #bounding box extents
+    min_xyz = verts.min(dim=0).values
+    max_xyz = verts.max(dim=0).values
+    extents = max_xyz - min_xyz
+    #encourage one dominant axis
+    anisotropy_loss = -torch.max(extents)
+
+    loss_total = avg_loss + smooth_loss + 0.2 * anisotropy_loss
+    
+    #volume loss to encourage the mesh to maintain a reasonable size
+    volume = torch.prod(extents)
+    volume_loss = (volume - 1.0).abs()
+
+    loss_total += 0.05 * volume_loss
 
     optimiser.zero_grad()
     loss_total.backward()
@@ -130,6 +150,7 @@ for step in range(num_steps):
     #print progress every 10 steps, showing CLIP loss and smoothness loss
     if step % 10 == 0:
         print(f"Step {step:03d} | CLIP loss: {avg_loss.item():.4f} | Smooth loss: {smooth_loss.item():.4f}")
+
 
 print("Optimisation done")
 
