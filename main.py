@@ -85,7 +85,7 @@ def render_mesh(verts_np, faces_np, elev=30, azim=45, image_size=224):
 # Optimiser with Laplacian smoothing
 # -------------------------------
 #lr = learning rate for vertex updates - controls how much the mesh changes each step 
-optimiser = torch.optim.Adam([verts], lr=3e-3) 
+optimiser = torch.optim.Adam([verts], lr=1e-3) 
 #number of optimisation steps - more steps allows for better convergence but takes longer
 num_steps = 250
 #weight for Laplacian smoothing
@@ -164,7 +164,7 @@ for step in range(num_steps):
         verts[:] = torch.clamp(verts, -2.0, 2.0)
         #limit vertex movement per step to prevent instability
         delta = verts - verts_prev
-        delta = torch.clamp(delta, -0.01, 0.01)
+        delta = torch.clamp(delta, -0.005, 0.005)
         verts.copy_(verts_prev + delta)
 
     #print progress every 10 steps, showing CLIP loss and smoothness loss
