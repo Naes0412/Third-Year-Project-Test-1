@@ -1,0 +1,12 @@
+name: clip3d
+channels:
+  - defaults
+dependencies:
+  - python=3.9
+  - numpy
+  - pillow
+  - matplotlib
+  - pip
+  - pip:
+      - trimesh
+      - git+https://github.com/openai/CLIP.git

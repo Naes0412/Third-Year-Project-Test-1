@@ -5,20 +5,17 @@ import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
 
-# -------------------------------
-# Device
-# -------------------------------
+# ------------------------------- Device -------------------------------
 
 device = torch.device("cpu")
 
 
-# -------------------------------
-# Load CLIP
-# -------------------------------
+# ------------------------------- Load CLIP -------------------------------
 
 clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
 clip_model.eval()
 
+#text prompt of the desired shape
 text_prompt = "a simple, boxy vase with a narrow neck and wide base"
 #turn text prompt into tokens that CLIP can understand
 text_tokens = clip.tokenize([text_prompt]).to(device)
@@ -28,9 +25,7 @@ with torch.no_grad():
     text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
     
 
-# -------------------------------
-# Create mesh (simple cube)
-# -------------------------------
+# ------------------------------- Create mesh -------------------------------
 
 mesh = trimesh.creation.box(extents=(1.0, 1.0, 1.0))
 #subdivide to increase vertex count for smoother optimisation
@@ -40,9 +35,7 @@ verts = torch.tensor(mesh.vertices, dtype=torch.float32, device=device, requires
 faces = np.array(mesh.faces)
 
 
-# -------------------------------
-# Compute Laplacian adjacency for smoothing
-# -------------------------------
+# ------------------------------- Compute Laplacian adjacency for smoothing -------------------------------
 
 def compute_laplacian(vertices, faces):
     n = vertices.shape[0]
@@ -59,9 +52,7 @@ def compute_laplacian(vertices, faces):
 L = compute_laplacian(verts, faces)
 
 
-# -------------------------------
-# Renderer (CPU)
-# -------------------------------
+# ------------------------------- Renderer (CPU) -------------------------------
 def render_mesh(verts_np, faces_np, elev=30, azim=45, image_size=224):
     #Simple CPU renderer using matplotlib
     fig = plt.figure(figsize=(3, 3), dpi=image_size // 3)
@@ -85,9 +76,7 @@ def render_mesh(verts_np, faces_np, elev=30, azim=45, image_size=224):
     return np.array(img_pil)
 
 
-# -------------------------------
-# Optimiser with Laplacian smoothing
-# -------------------------------
+# ------------------------------- Optimiser with Laplacian smoothing -------------------------------
 
 #lr = learning rate for vertex updates - controls how much the mesh changes each step 
 optimiser = torch.optim.Adam([verts], lr=1e-3) 
@@ -186,9 +175,7 @@ for step in range(num_steps):
 print("Optimisation done")
 
 
-# -------------------------------
-# Visualize final mesh
-# -------------------------------
+# ------------------------------- Visualisation --------------------------------
 
 #convert final optimised vertices to numpy for visualization
 final_verts = verts.detach().cpu().numpy()
