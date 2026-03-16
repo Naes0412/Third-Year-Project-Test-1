@@ -24,10 +24,11 @@ output_dir = "outputs"
 
 if os.path.exists(output_dir):
     for f in os.listdir(output_dir):
-        os.remove(os.path.join(output_dir, f))
+        full_path = os.path.join(output_dir, f)
+        if os.path.isfile(full_path):
+            os.remove(full_path)
 else:
     os.makedirs(output_dir)
-
 
 # ------------------------------- Device -------------------------------
 
@@ -62,8 +63,8 @@ textures = TexturesVertex(verts_features=verts_rgb)
 
 # ------------------------------- Differentiable Renderer -------------------------------
 
-def get_renderer():
-    R, T = look_at_view_transform(2.5, 20, 45)
+def get_renderer(elev=20, azim=45):
+    R, T = look_at_view_transform(2.5, elev, azim)
     cameras = FoVPerspectiveCameras(device=device, R=R, T=T)
 
     raster_settings = RasterizationSettings(
@@ -88,18 +89,17 @@ def get_renderer():
 
     return renderer
 
-renderer = get_renderer()
-
 
 # ------------------------------- Optimiser -------------------------------
 
 optimiser = torch.optim.Adam([verts], lr=1e-3)
-num_steps = 300
+num_steps = 500
 eps = 1e-8
 
 
 # ------------------------------- Optimisation Loop -------------------------------
 
+#save initial vertices for regularisation
 verts_init = verts.detach().clone()
 
 for step in range(num_steps):
@@ -112,18 +112,24 @@ for step in range(num_steps):
         textures=textures
     )
 
-    images = renderer(mesh)
-    image = images[0, ..., :3]  # RGB only
-    image = image.permute(2, 0, 1).unsqueeze(0)
-
-    img_feat = clip_model.encode_image(image)
-    img_feat = img_feat / (img_feat.norm(dim=-1, keepdim=True) + eps)
-
-    clip_loss = 1 - torch.cosine_similarity(img_feat, text_feat)
+    viewpoints = [(20, 45), (20, 135), (20, 225), (20, 315)]
+    clip_loss = 0
+    
+    for elev, azim in viewpoints:
+        r = get_renderer(elev, azim)
+        images = r(mesh)
+        image = images[0, ..., :3].permute(2, 0, 1).unsqueeze(0)
+        img_feat = clip_model.encode_image(image)
+        img_feat = img_feat / (img_feat.norm(dim=-1, keepdim=True) + eps)
+        clip_loss += 1 - torch.cosine_similarity(img_feat, text_feat)
+        
+    clip_loss /= len(viewpoints)
 
     centroid = verts.mean(dim=0)
-    centroid_loss = 0.1 * (centroid ** 2).sum()
-    displacement_loss = 0.1 * ((verts - verts_init) ** 2).sum()
+    # centroid_loss encourages the mesh to stay centered around the origin, preventing it from drifting too far away
+    centroid_loss = 0.01 * (centroid ** 2).sum()
+    # displacement_loss prevents excessive vertex displacement from the initial position
+    displacement_loss = 0.01 * ((verts - verts_init) ** 2).sum()
     reg_loss = centroid_loss + displacement_loss
 
     loss = clip_loss + reg_loss
@@ -132,7 +138,7 @@ for step in range(num_steps):
     optimiser.step()
     
     if step % 50 == 0:
-        rendered = renderer(mesh)[0, ..., :3].detach().cpu().numpy()
+        rendered = get_renderer(20,45)(mesh)[0, ..., :3].detach().cpu().numpy()
         rendered = (rendered * 255).astype(np.uint8)
         Image.fromarray(rendered).save(os.path.join(output_dir, f"render_{step}.png"))
 
