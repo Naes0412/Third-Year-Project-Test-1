@@ -8,7 +8,7 @@ pip install fvcore iopath
 
 git clone https://github.com/facebookresearch/pytorch3d.git
 cd pytorch3d
-export TORCH_CUDA_ARCH_LIST="8.9"
+export TORCH_CUDA_ARCH_LIST="8.6"
 export FORCE_CUDA=1
 python setup.py install
 cd ..
