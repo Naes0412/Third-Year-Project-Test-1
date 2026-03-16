@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import clip
 import trimesh
 import numpy as np
@@ -40,7 +41,7 @@ device = torch.device("cuda")
 clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
 clip_model.eval()
 
-text_prompt = "a tall, narrow cylinder"
+text_prompt = "a pyramid shape"
 
 text_tokens = clip.tokenize([text_prompt]).to(device)
 with torch.no_grad():
@@ -53,12 +54,29 @@ with torch.no_grad():
 mesh = trimesh.creation.box(extents=(1, 1, 1))
 mesh = mesh.subdivide().subdivide()
 
-verts = torch.tensor(mesh.vertices, dtype=torch.float32, device=device, requires_grad=True)
+verts = torch.tensor(mesh.vertices, dtype=torch.float32, device=device)
 faces = torch.tensor(mesh.faces, dtype=torch.int64, device=device)
 
-# White vertex colour
-verts_rgb = torch.ones_like(verts)[None]
-textures = TexturesVertex(verts_features=verts_rgb)
+# -------------------------------- MLP Displacement Network -------------------------------
+
+class DisplacementMLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(3, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 3),
+            nn.Tanh()  # bounds displacements to [-1, 1]
+        )
+
+    def forward(self, verts):
+        # max displacement of 0.1 units per vertex
+        return verts + 0.1 * self.net(verts)
+
+mlp = DisplacementMLP().to(device)
+optimiser = torch.optim.Adam(mlp.parameters(), lr=1e-3)
 
 
 # ------------------------------- Differentiable Renderer -------------------------------
@@ -90,21 +108,22 @@ def get_renderer(elev=20, azim=45):
     return renderer
 
 
-# ------------------------------- Optimiser -------------------------------
-
-optimiser = torch.optim.Adam([verts], lr=1e-3)
-num_steps = 500
-eps = 1e-8
-
-
 # ------------------------------- Optimisation Loop -------------------------------
 
+num_steps = 800
+eps = 1e-8
+viewpoints = [(20, 0), (20, 90), (20, 180), (20, 270), (60, 45), (-10, 45)]
+
 #save initial vertices for regularisation
-verts_init = verts.detach().clone()
+verts_init = verts.clone()
 
 for step in range(num_steps):
 
     optimiser.zero_grad()
+    
+    verts = mlp(verts_init)
+    verts_rgb = torch.ones_like(verts)[None]
+    textures = TexturesVertex(verts_features=verts_rgb)
 
     mesh = Meshes(
         verts=[verts],
@@ -112,7 +131,6 @@ for step in range(num_steps):
         textures=textures
     )
 
-    viewpoints = [(20, 45), (20, 135), (20, 225), (20, 315)]
     clip_loss = 0
     
     for elev, azim in viewpoints:
@@ -128,13 +146,11 @@ for step in range(num_steps):
     centroid = verts.mean(dim=0)
     # centroid_loss encourages the mesh to stay centered around the origin, preventing it from drifting too far away
     centroid_loss = 0.01 * (centroid ** 2).sum()
-    # displacement_loss prevents excessive vertex displacement from the initial position
-    displacement_loss = 0.01 * ((verts - verts_init) ** 2).sum()
-    reg_loss = centroid_loss + displacement_loss
+    reg_loss = centroid_loss
 
     loss = clip_loss + reg_loss
     loss.backward()
-    torch.nn.utils.clip_grad_norm_([verts], max_norm=1.0)
+    torch.nn.utils.clip_grad_norm_(mlp.parameters(), max_norm=1.0)
     optimiser.step()
     
     if step % 50 == 0:
