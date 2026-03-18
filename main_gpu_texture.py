@@ -4,6 +4,7 @@ import clip
 import trimesh
 import numpy as np
 from PIL import Image
+import torchvision.transforms.functional as TF
 
 # PyTorch3D imports
 from pytorch3d.structures import Meshes
@@ -52,9 +53,6 @@ with torch.no_grad():
 
 mesh_input = trimesh.load("male_human.obj")
 
-if isinstance(mesh_input, trimesh.Scene):
-    mesh_input = trimesh.util.concatenate(mesh_input.dump())
-
 # Center and scale to unit size
 mesh_input.vertices -= mesh_input.centroid
 scale = 1.0 / (mesh_input.bounds[1][1] - mesh_input.bounds[0][1])
@@ -90,11 +88,11 @@ scheduler = torch.optim.lr_scheduler.StepLR(optimiser, step_size=200, gamma=0.5)
 
 # ------------------------------- Renderer -------------------------------
 
-def get_renderer(elev=20, azim=45):
-    R, T = look_at_view_transform(3.0, elev, azim)
+def get_renderer(elev=0, azim=0):
+    R, T = look_at_view_transform(1.2, elev, azim)
     cameras = FoVPerspectiveCameras(device=device, R=R, T=T, fov=60)
     raster_settings = RasterizationSettings(
-        image_size=224,
+        image_size=512,
         blur_radius=0.0,
         faces_per_pixel=1,
     )
@@ -132,6 +130,7 @@ for step in range(num_steps):
         r = get_renderer(elev, azim)
         images = r(mesh_obj)
         image = images[0, ..., :3].permute(2, 0, 1).unsqueeze(0)
+        image = TF.resize(image, [224, 224])
         img_feat = clip_model.encode_image(image)
         img_feat = img_feat / (img_feat.norm(dim=-1, keepdim=True) + eps)
         clip_loss += 1 - torch.cosine_similarity(img_feat, text_feat)
@@ -144,7 +143,7 @@ for step in range(num_steps):
     scheduler.step()
 
     if step % 50 == 0:
-        rendered = get_renderer(20, 45)(mesh_obj)[0, ..., :3].detach().cpu().numpy()
+        rendered = get_renderer(0, 0)(mesh_obj)[0, ..., :3].detach().cpu().numpy()
         rendered = (rendered * 255).astype(np.uint8)
         Image.fromarray(rendered).save(os.path.join(output_dir, f"render_{step}.png"))
 
