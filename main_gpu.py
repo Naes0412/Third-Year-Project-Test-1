@@ -74,11 +74,13 @@ class DisplacementMLP(nn.Module):
         )
 
     def forward(self, verts):
-        # max displacement of 0.3 units per vertex
-        return verts + 0.3 * self.net(verts)
+        # max displacement of 0.2 units per vertex
+        return verts + 0.2 * self.net(verts)
 
 mlp = DisplacementMLP().to(device)
-optimiser = torch.optim.Adam(mlp.parameters(), lr=5e-3)
+optimiser = torch.optim.Adam(mlp.parameters(), lr=1e-3)
+
+scheduler = torch.optim.lr_scheduler.StepLR(optimiser, step_size=200, gamma=0.5)
 
 
 # ------------------------------- Differentiable Renderer -------------------------------
@@ -135,6 +137,8 @@ for step in range(num_steps):
 
     clip_loss = 0
     
+    #render the mesh from multiple viewpoints and compute the CLIP loss for each view, 
+    #encouraging the mesh to match the text prompt from all angles
     for elev, azim in viewpoints:
         r = get_renderer(elev, azim)
         images = r(mesh)
@@ -143,25 +147,36 @@ for step in range(num_steps):
         img_feat = img_feat / (img_feat.norm(dim=-1, keepdim=True) + eps)
         clip_loss += 1 - torch.cosine_similarity(img_feat, text_feat)
         
+    #average the CLIP loss across all viewpoints to get a more stable optimisation signal
     clip_loss /= len(viewpoints)
-
+    
+    #centroid_loss encourages the mesh to stay centered around the origin, preventing it from drifting too far away
     centroid = verts.mean(dim=0)
-    # centroid_loss encourages the mesh to stay centered around the origin, preventing it from drifting too far away
     centroid_loss = 0.01 * (centroid ** 2).sum()
-    reg_loss = centroid_loss
+    
+    #displacement_loss encourages the vertices to not deviate too much from their initial positions, which helps maintain a reasonable shape and prevents extreme distortions
+    displaced = mlp(verts_init)
+    displacement_loss = 0.01 * ((displaced - verts_init) ** 2).mean()
+    
+    reg_loss = centroid_loss + displacement_loss
 
     loss = clip_loss + reg_loss
     loss.backward()
     torch.nn.utils.clip_grad_norm_(mlp.parameters(), max_norm=1.0)
     optimiser.step()
     
+    #save renders every 50 steps to visualise optimisation progress
     if step % 50 == 0:
         rendered = get_renderer(20,45)(mesh)[0, ..., :3].detach().cpu().numpy()
         rendered = (rendered * 255).astype(np.uint8)
         Image.fromarray(rendered).save(os.path.join(output_dir, f"render_{step}.png"))
 
+    #print the loss every 20 steps to monitor optimisation progress
     if step % 20 == 0:
         print(f"Step {step} | Loss: {loss.item():.4f}")
+    
+    #reduce learning rate every 200 steps to allow for finer adjustments as optimisation progresses
+    scheduler.step()
 
 print("Optimisation complete.")
 
