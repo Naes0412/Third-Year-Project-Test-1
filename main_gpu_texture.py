@@ -192,7 +192,7 @@ for step in range(num_steps):
     #smooth loss to suppress noisy colour variation
     smooth_loss = colour_smoothness_loss(verts_rgb, faces)
     
-    loss = clip_loss + 0.3 * smooth_loss
+    loss = clip_loss + 1.5 * smooth_loss
     loss.backward()
     torch.nn.utils.clip_grad_norm_(mlp.parameters(), max_norm=1.0)
     optimiser.step()
