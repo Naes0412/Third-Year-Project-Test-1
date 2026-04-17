@@ -127,11 +127,9 @@ def get_renderer(elev=0, azim=0):
         blur_radius=0.0,
         faces_per_pixel=1,
     )
-    lights = PointLights(device=device, 
-                         location=[[2.0, 2.0, -2.0]],
-                         ambient_color=[[0.5, 0.5, 0.5]],
-                         diffuse_color=[[0.7, 0.7, 0.7]],
-                         specular_color=[[0.2, 0.2, 0.2]])
+    
+    #ambient light for flat lighting, no shadows
+    lights = AmbientLights(device=device)
     
     renderer = MeshRenderer(
         rasterizer=MeshRasterizer(
@@ -189,10 +187,17 @@ for step in range(num_steps):
         clip_loss += 1 - torch.cosine_similarity(img_feat, text_feat)
     clip_loss /= len(viewpoints)
 
-    #smooth loss to suppress noisy colour variation
-    smooth_loss = colour_smoothness_loss(verts_rgb, faces)
+    #colour smooth loss to suppress noisy colour variation
+    colour_smooth_loss = colour_smoothness_loss(verts_rgb, faces)
     
-    loss = clip_loss + 1.5 * smooth_loss
+    for step in range(num_steps):
+        optimiser.zero_grad()
+        verts_rgb = mlp(verts)
+    
+        #colour smoothness weight: start high, decay to let CLIP sharpen details
+        colour_smooth_weight = 1.0 * (0.1 ** (step / num_steps))  # 1.0 -> 0.1
+    
+    loss = clip_loss + colour_smooth_weight * colour_smooth_loss
     loss.backward()
     torch.nn.utils.clip_grad_norm_(mlp.parameters(), max_norm=1.0)
     optimiser.step()
