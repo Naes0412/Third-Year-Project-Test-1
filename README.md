@@ -1,5 +1,7 @@
 ## Installation
 
+### ----- Option 1 - Vast.ai -----
+
 Tested on: RTX 3090 (sm_86) / RTX 4090 (sm_89), CUDA 12.x, Python 3.12
 
 ### 1. Clone repository
@@ -24,3 +26,7 @@ bash setup.sh
 
 ### 5. Run
 python main_gpu.py
+
+### ----- Option 2 - Google Colab -----
+
+TBA

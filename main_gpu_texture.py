@@ -21,11 +21,23 @@ from pytorch3d.renderer import (
 
 import os
 
+import torchvision.transforms as T
+
 # If running in Google Colab, mount Google Drive to save outputs
 # - run comment below in a cell before the main code to enable saving outputs to Drive
 
 # from google.colab import drive
 # drive.mount('/content/drive')
+
+def get_augmented_crops(image, n_crops=8):
+    crops = []
+    for _ in range(n_crops):
+        scale = torch.FloatTensor(1).uniform_(0.5, 1.0).item()
+        size = int(224 * scale)
+        crop = T.RandomCrop(size)(image.squeeze(0))
+        crop = TF.resize(crop.unsqueeze(0), [224, 224])
+        crops.append(crop)
+    return torch.cat(crops, dim=0)  # [n_crops, 3, 224, 224]
 
 # Ensure output directory exists
 output_dir = "outputs"
@@ -44,7 +56,7 @@ device = torch.device("cuda")
 
 # ------------------------------- Load CLIP -------------------------------
 
-clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
+clip_model, clip_preprocess = clip.load("ViT-B/16", device=device)
 clip_model.eval()
 
 text_prompt = "a 3D render of Iron Man armor, red metallic chest plate, gold legs and arms, superhero suit"
@@ -176,17 +188,25 @@ for step in range(num_steps):
     for elev, azim in viewpoints:
         r = get_renderer(elev, azim)
         images = r(mesh_obj)
-        image = images[0, ..., :3].permute(2, 0, 1).unsqueeze(0)
+        image = images[0, ..., :3].permute(2, 0, 1).unsqueeze(0)   
         image = TF.resize(image, [224, 224])
         
-        #normalise using CLIP's mean and std
-        image = TF.normalize(image, 
-            mean=[0.48145466, 0.4578275,  0.40821073],
-            std= [0.26862954, 0.26130258, 0.27577711])
+        # #normalise using CLIP's mean and std
+        # image = TF.normalize(image, 
+        #     mean=[0.48145466, 0.4578275,  0.40821073],
+        #     std= [0.26862954, 0.26130258, 0.27577711])
+        
+        #normalise each crop using CLIP's mean and std
+        crops = get_augmented_crops(image, n_crops=8)
+        crops = TF.normalize(crops, mean=[0.48145466, 0.4578275,  0.40821073], std= [0.26862954, 0.26130258, 0.27577711])
 
-        img_feat = clip_model.encode_image(image)
-        img_feat = img_feat / (img_feat.norm(dim=-1, keepdim=True) + eps)
-        clip_loss += 1 - torch.cosine_similarity(img_feat, text_feat)
+        #encode all crops in one batch
+        img_feats = clip_model.encode_image(crops)
+        img_feats = img_feats / (img_feats.norm(dim=-1, keepdim=True) + eps)
+        
+        #avg clip loss across all crops for this viewpoint
+        clip_loss += (1 - torch.cosine_similarity(img_feats, text_feat.expand(8, -1))).mean()
+        
     clip_loss /= len(viewpoints)
 
     #colour smooth loss to suppress noisy colour variation
