@@ -4,6 +4,8 @@ import clip
 import trimesh
 import numpy as np
 from PIL import Image
+import torchvision.transforms.functional as TF
+import torchvision.transforms as T
 
 # PyTorch3D imports
 from pytorch3d.structures import Meshes
@@ -13,19 +15,21 @@ from pytorch3d.renderer import (
     MeshRenderer,
     MeshRasterizer,
     SoftPhongShader,
-    PointLights,
+    AmbientLights,
     TexturesVertex,
     look_at_view_transform
 )
 
 import os
 
-from google.colab import drive
-drive.mount('/content/drive')
+# If running in Google Colab, mount Google Drive to save outputs
+# - uncomment below to enable saving outputs to Drive
+
+# from google.colab import drive
+# drive.mount('/content/drive')
 
 # Ensure output directory exists
 output_dir = "outputs"
-
 if os.path.exists(output_dir):
     for f in os.listdir(output_dir):
         full_path = os.path.join(output_dir, f)
@@ -41,10 +45,11 @@ device = torch.device("cuda")
 
 # ------------------------------- Load CLIP -------------------------------
 
-clip_model, clip_preprocess = clip.load("ViT-B/32", device=device)
+# ViT-B/16 gives stronger gradient signal than ViT-B/32
+clip_model, clip_preprocess = clip.load("ViT-B/16", device=device)
 clip_model.eval()
 
-text_prompt = "a square pyramid with a pointed top and wide flat base"
+text_prompt = "Iron Man armor suit, metallic red and gold, superhero"
 
 text_tokens = clip.tokenize([text_prompt]).to(device)
 with torch.no_grad():
@@ -52,146 +57,209 @@ with torch.no_grad():
     text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
 
 
-# ------------------------------- Create Mesh -------------------------------
+# ------------------------------- Load Mesh -------------------------------
 
-mesh = trimesh.creation.box(extents=(1, 1, 1))
-mesh = mesh.subdivide().subdivide()
+mesh_input = trimesh.load("male_human.obj")
 
-verts = torch.tensor(mesh.vertices, dtype=torch.float32, device=device)
-faces = torch.tensor(mesh.faces, dtype=torch.int64, device=device)
+# handle scene vs mesh
+if isinstance(mesh_input, trimesh.Scene):
+    mesh_input = trimesh.util.concatenate(mesh_input.dump())
 
-# -------------------------------- MLP Displacement Network -------------------------------
+# center and scale to unit size
+mesh_input.vertices -= mesh_input.centroid
+scale = 1.0 / (mesh_input.bounds[1][1] - mesh_input.bounds[0][1])
+mesh_input.vertices *= scale
+
+verts_init = torch.tensor(mesh_input.vertices, dtype=torch.float32, device=device)
+faces = torch.tensor(mesh_input.faces, dtype=torch.int64, device=device)
+
+print(f"Mesh loaded: {verts_init.shape[0]} vertices, {faces.shape[0]} faces")
+print(f"Y range: {verts_init[:, 1].min().item():.3f} to {verts_init[:, 1].max().item():.3f}")
+print(f"X range: {verts_init[:, 0].min().item():.3f} to {verts_init[:, 0].max().item():.3f}")
+
+
+# ------------------------------- Fourier Encoding -------------------------------
+
+class FourierEncoding(nn.Module):
+    def __init__(self, num_freqs=6):
+        super().__init__()
+        self.register_buffer(
+            'freqs',
+            2.0 ** torch.arange(num_freqs).float() * torch.pi
+        )
+
+    def forward(self, x):
+        # x: [N, 3]
+        x_freq = x.unsqueeze(-1) * self.freqs   # [N, 3, num_freqs]
+        x_freq = x_freq.reshape(x.shape[0], -1) # [N, 3 * num_freqs]
+        # output dim: 3 + 2 * 3 * num_freqs = 39 (for num_freqs=6)
+        return torch.cat([x, torch.sin(x_freq), torch.cos(x_freq)], dim=-1)
+
+
+# ------------------------------- Displacement MLP -------------------------------
 
 class DisplacementMLP(nn.Module):
-    def __init__(self):
+    def __init__(self, num_freqs=6):
         super().__init__()
+        self.enc = FourierEncoding(num_freqs)
+        in_dim = 3 + 2 * 3 * num_freqs  # 39
+
         self.net = nn.Sequential(
-            nn.Linear(3, 128),
+            nn.Linear(in_dim, 256),
             nn.ReLU(),
-            nn.Linear(128, 128),
+            nn.Linear(256, 256),
             nn.ReLU(),
-            nn.Linear(128, 64),
+            nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Linear(64, 3),
-            nn.Tanh()
+            nn.Linear(128, 3),
+            nn.Tanh()  # bounds displacement to [-1, 1] before scaling
         )
 
     def forward(self, verts):
-        #max displacement of 0.2 units per vertex
-        return verts + 0.2 * self.net(verts)
+        encoded = self.enc(verts)
+        # displacement scale of 0.3 - enough for armor bulking
+        # but conservative enough to preserve human topology
+        return verts + 0.3 * self.net(encoded)
 
-mlp = DisplacementMLP().to(device)
+mlp = DisplacementMLP(num_freqs=6).to(device)
 optimiser = torch.optim.Adam(mlp.parameters(), lr=1e-3)
+scheduler = torch.optim.lr_scheduler.StepLR(optimiser, step_size=400, gamma=0.6)
 
-scheduler = torch.optim.lr_scheduler.StepLR(optimiser, step_size=200, gamma=0.5)
+
+# ------------------------------- Augmented Crops -------------------------------
+
+def get_augmented_crops(image, n_crops=8):
+    crops = []
+    _, h, w = image.shape
+    min_size = min(h, w) // 2  # min crop is 50% of image
+    for _ in range(n_crops):
+        scale = torch.FloatTensor(1).uniform_(0.5, 1.0).item()
+        size = int(min_size + scale * (min(h, w) - min_size))
+        crop = T.RandomCrop(size)(image)
+        crop = TF.resize(crop.unsqueeze(0), [224, 224])
+        crops.append(crop)
+    return torch.cat(crops, dim=0)  # [n_crops, 3, 224, 224]
 
 
-# ------------------------------- Differentiable Renderer -------------------------------
+# ------------------------------- Renderer -------------------------------
 
-#can render the mesh from any viewpoint
-# - elev controls the vertical angle of the camera, azim controls the horizontal angle
-def get_renderer(elev=20, azim=45):
-    R, T = look_at_view_transform(2.5, elev, azim)
-    cameras = FoVPerspectiveCameras(device=device, R=R, T=T)
-
+def get_renderer(elev=0, azim=0):
+    R, T = look_at_view_transform(2.0, elev, azim)
+    cameras = FoVPerspectiveCameras(device=device, R=R, T=T, fov=30)
     raster_settings = RasterizationSettings(
-        image_size=224,
+        image_size=512,
         blur_radius=0.0,
         faces_per_pixel=1,
     )
-
-    lights = PointLights(device=device, location=[[2.0, 2.0, -2.0]])
+    # ambient lighting to avoid shadow artefacts interfering with CLIP
+    lights = AmbientLights(device=device, ambient_color=((0.6, 0.6, 0.6),))
 
     renderer = MeshRenderer(
-        rasterizer=MeshRasterizer(
-            cameras=cameras,
-            raster_settings=raster_settings
-        ),
-        shader=SoftPhongShader(
-            device=device,
-            cameras=cameras,
-            lights=lights
-        )
+        rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings),
+        shader=SoftPhongShader(device=device, cameras=cameras, lights=lights)
     )
-
     return renderer
+
+
+# ------------------------------- Regularisation Losses -------------------------------
+
+#penalises vertices that deviate from the average of their neighbours
+# - encourages smooth surfaces without overly penalising large shape changes that may be needed for armor
+def laplacian_smoothness_loss(verts, faces):
+    v0 = verts[faces[:, 0]]
+    v1 = verts[faces[:, 1]]
+    v2 = verts[faces[:, 2]]
+    # each vertex should be close to the centroid of its neighbours
+    centroid = (v0 + v1 + v2) / 3.0
+    loss = ((v0 - centroid).pow(2) + (v1 - centroid).pow(2) + (v2 - centroid).pow(2)).mean()
+    return loss
+
+#penalises large displacements from the original mesh to preserve human topology
+# - allows for armor-scale shape changes while preventing collapse or explosion of the mesh
+def displacement_regularisation(verts, verts_init):
+    return ((verts - verts_init) ** 2).mean()
 
 
 # ------------------------------- Optimisation Loop -------------------------------
 
-num_steps = 800
+num_steps = 1500
 eps = 1e-8
-viewpoints = [(20, 0), (20, 90), (20, 180), (20, 270), (60, 45), (-10, 45)]
-
-#save initial vertices for regularisation
-verts_init = verts.clone()
+viewpoints = [(20, 0), (20, 90), (20, 180), (20, 270), (60, 45), (-10, 45), (90, 0)]
 
 for step in range(num_steps):
 
     optimiser.zero_grad()
-    
+
+    # get displaced vertices from MLP
     verts = mlp(verts_init)
-    verts_rgb = torch.ones_like(verts)[None]
+
+    # white vertex colours - shape only, no colour signal
+    verts_rgb = torch.ones_like(verts).unsqueeze(0)
     textures = TexturesVertex(verts_features=verts_rgb)
 
-    mesh = Meshes(
+    mesh_obj = Meshes(
         verts=[verts],
         faces=[faces],
         textures=textures
     )
 
+    # CLIP loss across multiple viewpoints with augmented crops
     clip_loss = 0
-    
-    #render the mesh from multiple viewpoints and compute the CLIP loss for each view, 
-    #encouraging the mesh to match the text prompt from all angles
     for elev, azim in viewpoints:
         r = get_renderer(elev, azim)
-        images = r(mesh)
-        image = images[0, ..., :3].permute(2, 0, 1).unsqueeze(0)
-        img_feat = clip_model.encode_image(image)
-        img_feat = img_feat / (img_feat.norm(dim=-1, keepdim=True) + eps)
-        clip_loss += 1 - torch.cosine_similarity(img_feat, text_feat)
-        
-    #average the CLIP loss across all viewpoints to get a more stable optimisation signal
-    clip_loss /= len(viewpoints)
-    
-    #centroid_loss encourages the mesh to stay centered around the origin, preventing it from drifting too far away
-    centroid = verts.mean(dim=0)
-    centroid_loss = 0.01 * (centroid ** 2).sum()
-    
-    #displacement_loss encourages the vertices to not deviate too much from their initial positions, which helps maintain a reasonable shape and prevents extreme distortions
-    displaced = mlp(verts_init)
-    displacement_loss = 0.01 * ((displaced - verts_init) ** 2).mean()
-    
-    reg_loss = centroid_loss + displacement_loss
+        images = r(mesh_obj)
+        image = images[0, ..., :3].permute(2, 0, 1)  # [3, 512, 512]
 
-    loss = clip_loss + reg_loss
+        crops = get_augmented_crops(image, n_crops=8)
+        crops = TF.normalize(crops,
+                             mean=[0.48145466, 0.4578275,  0.40821073],
+                             std= [0.26862954, 0.26130258, 0.27577711])
+
+        img_feats = clip_model.encode_image(crops)
+        img_feats = img_feats / (img_feats.norm(dim=-1, keepdim=True) + eps)
+        clip_loss += (1 - torch.cosine_similarity(img_feats, text_feat.expand(8, -1))).mean()
+
+    clip_loss /= len(viewpoints)
+
+    #regularisation losses to preserve human mesh topology
+    lap_loss = laplacian_smoothness_loss(verts, faces)
+    disp_loss = displacement_regularisation(verts, verts_init)
+
+    #centroid loss keeps mesh centered at origin
+    centroid_loss = (verts.mean(dim=0) ** 2).sum()
+
+    #displacement reg starts strong then decays to allow more deformation later
+    disp_weight = 0.1 * (0.1 ** (step / num_steps))  # 0.1 -> 0.01
+    
+    #combine - CLIP drives shape, regularisation preserves topology
+    loss = clip_loss + 0.05 * lap_loss + disp_weight * disp_loss + 0.01 * centroid_loss
+
     loss.backward()
     torch.nn.utils.clip_grad_norm_(mlp.parameters(), max_norm=1.0)
     optimiser.step()
-    
-    #save renders every 50 steps to visualise optimisation progress
+    scheduler.step()
+
     if step % 50 == 0:
-        rendered = get_renderer(20,45)(mesh)[0, ..., :3].detach().cpu().numpy()
+        rendered = get_renderer(20, 0)(mesh_obj)[0, ..., :3].detach().cpu().numpy()
         rendered = (rendered * 255).astype(np.uint8)
         Image.fromarray(rendered).save(os.path.join(output_dir, f"render_{step}.png"))
 
-    #print the loss every 20 steps to monitor optimisation progress
     if step % 20 == 0:
-        print(f"Step {step} | Loss: {loss.item():.4f}")
-    
-    #reduce learning rate every 200 steps to allow for finer adjustments as optimisation progresses
-    scheduler.step()
+        print(f"Step {step:4d} | Loss: {loss.item():.4f} | CLIP: {clip_loss.item():.4f} | Lap: {lap_loss.item():.4f} | Disp: {disp_loss.item():.4f}")
+
+#final render
+rendered = get_renderer(20, 0)(mesh_obj)[0, ..., :3].detach().cpu().numpy()
+rendered = (rendered * 255).astype(np.uint8)
+Image.fromarray(rendered).save(os.path.join(output_dir, f"render_{num_steps}.png"))
 
 print("Optimisation complete.")
 
 
-# ------------------------------- Save final mesh to file -------------------------------
+# ------------------------------- Save Final Mesh -------------------------------
 
 final_verts = verts.detach().cpu().numpy()
 final_faces = faces.detach().cpu().numpy()
 
 final_mesh = trimesh.Trimesh(vertices=final_verts, faces=final_faces)
-
 final_mesh.export(os.path.join(output_dir, "final_result.obj"))
 print("Saved final_result.obj")
