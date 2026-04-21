@@ -168,16 +168,20 @@ def get_renderer(elev=0, azim=0):
 
 # ------------------------------- Regularisation Losses -------------------------------
 
-#penalises vertices that deviate from the average of their neighbours
-# - encourages smooth surfaces without overly penalising large shape changes that may be needed for armor
+#penalises large differences between connected vertices to preserve smoothness and prevent mesh collapse/explosion
 def laplacian_smoothness_loss(verts, faces):
-    v0 = verts[faces[:, 0]]
-    v1 = verts[faces[:, 1]]
-    v2 = verts[faces[:, 2]]
-    # each vertex should be close to the centroid of its neighbours
-    centroid = (v0 + v1 + v2) / 3.0
-    loss = ((v0 - centroid).pow(2) + (v1 - centroid).pow(2) + (v2 - centroid).pow(2)).mean()
-    return loss
+    # collect all edges from faces
+    edges = torch.cat([
+        faces[:, [0, 1]],
+        faces[:, [1, 2]],
+        faces[:, [0, 2]],
+    ], dim=0)  # [3F, 2]
+    
+    v_src = verts[edges[:, 0]]
+    v_dst = verts[edges[:, 1]]
+    
+    # penalise difference between connected vertices
+    return (v_src - v_dst).pow(2).mean()
 
 #penalises large displacements from the original mesh to preserve human topology
 # - allows for armor-scale shape changes while preventing collapse or explosion of the mesh
