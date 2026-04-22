@@ -1,4 +1,4 @@
-# main_gpu_texture.py:
+# colour.py:
 # This code optimises the vertex colours of a 3D mesh to match a text prompt using CLIP.
 # It uses a simple MLP with Fourier feature encoding to predict per-vertex RGB colours,
 # and a differentiable renderer to render the mesh from multiple viewpoints for CLIP loss calculation.

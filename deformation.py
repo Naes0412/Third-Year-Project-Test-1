@@ -1,7 +1,8 @@
-# main_gpu.py:
+# deformation.py:
 # This code optimises the vertex positions of a 3D mesh to match a text prompt using CLIP.
 # It uses a simple MLP with Fourier feature encoding to predict per-vertex displacements,
 # and a differentiable renderer to render the mesh from multiple viewpoints for CLIP loss calculation.
+
 import site
 site.addsitedir('/content/drive/MyDrive/pytorch3d_cache')
 import torch
@@ -44,7 +45,6 @@ device = torch.device("cuda")
 
 # ------------------------------- Load CLIP -------------------------------
 
-# ViT-B/16 gives stronger gradient signal than ViT-B/32
 clip_model, clip_preprocess = clip.load("ViT-B/16", device=device)
 clip_model.eval()
 
