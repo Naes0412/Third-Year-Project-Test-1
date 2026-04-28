@@ -27,6 +27,10 @@ from pytorch3d.renderer import (
     look_at_view_transform
 )
 import os
+import warnings
+import logging
+# Suppress the PyTorch3D bin size warning
+logging.getLogger("pytorch3d").setLevel(logging.ERROR)
 
 # Ensure output directory exists
 output_dir = "outputs_deformation"
@@ -191,21 +195,30 @@ def get_renderer(elev=0, azim=0):
 
 # ------------------------------- Regularisation Losses -------------------------------
 
+with torch.no_grad():
+    v_src_init = verts_init[edges[:, 0]]
+    v_dst_init = verts_init[edges[:, 1]]
+    mean_sq_edge_length_init = ((v_src_init - v_dst_init) ** 2).mean().clamp(min=1e-8)
+    print(f"Mean sq edge length (init): {mean_sq_edge_length_init.item():.8f}")
+
 #penalises large differences between connected vertices to preserve smoothness and prevent mesh collapse/explosion
-def laplacian_smoothness_loss(verts, edges):
+def laplacian_smoothness_loss(verts, edges, mean_sq_edge_length_init):
     v_src = verts[edges[:, 0]]  #v_src is the source vertex of each edge
     v_dst = verts[edges[:, 1]]  #v_dst is the destination vertex of each edge
     #Normalise by mean squared edge length of original mesh
     #so the loss is dimensionless and scale-independent
     diff = (v_src - v_dst) ** 2
-    mean_sq_edge_length = diff.detach().mean().clamp(min=1e-8) 
-    return diff.mean() / mean_sq_edge_length
+    return diff.mean() / mean_sq_edge_length_init
     
 
 #penalises large displacements from the original mesh to preserve human topology
 # - allows for armor-scale shape changes while preventing collapse or explosion of the mesh
 def displacement_regularisation(verts, verts_init):
-    return ((verts - verts_init) ** 2).mean()
+    diff = verts - verts_init
+    #penalise vertical (Y) displacement more than lateral (X/Z)
+    # Iron Man armor adds bulk outward, not height — this prevents elongation
+    weights = torch.tensor([1.0, 3.0, 1.0], device=device)
+    return (diff ** 2 * weights).mean()
 
 def normal_consistency_loss(verts, faces):
     #compute per-face normals
@@ -226,8 +239,8 @@ viewpoints = [(20, 0), (20, 90), (20, 180), (20, 270), (60, 45), (-10, 45), (90,
 
 #sanity check for Laplacian before training:
 with torch.no_grad():
-    test_lap = laplacian_smoothness_loss(verts_init, edges)
-    print(f"Laplacian sanity check on verts_init: {test_lap.item():.6f}  (should be > 0)")
+    test_lap = laplacian_smoothness_loss(verts_init, edges, mean_sq_edge_length_init)
+    print(f"Laplacian sanity check on verts_init: {test_lap.item():.6f}  (should be ~1.0)")
 
 for step in range(num_steps):
 
@@ -261,7 +274,7 @@ for step in range(num_steps):
     clip_loss = clip_loss / len(viewpoints)
 
     #regularisation losses to preserve human mesh topology
-    lap_loss = laplacian_smoothness_loss(verts, edges)
+    lap_loss = laplacian_smoothness_loss(verts, edges, mean_sq_edge_length_init)
     disp_loss = displacement_regularisation(verts, verts_init)
     norm_consist_loss = normal_consistency_loss(verts, faces)
 
@@ -285,7 +298,7 @@ for step in range(num_steps):
         Image.fromarray(rendered).save(os.path.join(output_dir, f"render_{step}.png"))
 
     if step % 20 == 0:
-        print(f"Step {step:4d} | Loss: {loss.item():.4f} | CLIP: {clip_loss.item():.6f} | Lap: {lap_loss.item():.6f} | Disp: {disp_loss.item():.4f}")
+        print(f"Step {step:4d} | Loss: {loss.item():.4f} | CLIP: {clip_loss.item():.6f} | Lap: {lap_loss.item():.6f} | Disp: {disp_loss.item():.6f}")
 
 #saving final render
 rendered = get_renderer(20, 0)(mesh_obj)[0, ..., :3].detach().cpu().numpy()
