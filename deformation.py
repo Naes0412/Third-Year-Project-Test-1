@@ -60,11 +60,11 @@ with torch.no_grad():
 
 mesh_input = trimesh.load("male_human.obj")
 
-# handle scene vs mesh
+#handle scene vs mesh
 if isinstance(mesh_input, trimesh.Scene):
     mesh_input = trimesh.util.concatenate(mesh_input.dump())
 
-# center and scale to unit size
+#center and scale to unit size
 mesh_input.vertices -= mesh_input.centroid
 scale = 1.0 / (mesh_input.bounds[1][1] - mesh_input.bounds[0][1])
 mesh_input.vertices *= scale
@@ -75,6 +75,14 @@ faces = torch.tensor(mesh_input.faces, dtype=torch.int64, device=device)
 print(f"Mesh loaded: {verts_init.shape[0]} vertices, {faces.shape[0]} faces")
 print(f"Y range: {verts_init[:, 1].min().item():.3f} to {verts_init[:, 1].max().item():.3f}")
 print(f"X range: {verts_init[:, 0].min().item():.3f} to {verts_init[:, 0].max().item():.3f}")
+
+#precompute edges for Laplacian loss
+edges = torch.cat([
+    faces[:, [0, 1]],
+    faces[:, [1, 2]],
+    faces[:, [0, 2]],
+], dim=0)  # [3F, 2]
+print(f"Edges tensor shape: {edges.shape[0]}, dtype: {edges.dtype}")
 
 
 # ------------------------------- Fourier Encoding -------------------------------
@@ -98,9 +106,10 @@ class FourierEncoding(nn.Module):
 # ------------------------------- Displacement MLP -------------------------------
 
 class DisplacementMLP(nn.Module):
-    def __init__(self, num_freqs=6):
+    def __init__(self, num_freqs=6, displacement_scale=0.03):
         super().__init__()
         self.enc = FourierEncoding(num_freqs)
+        self.displacement_scale = displacement_scale
         in_dim = 3 + 2 * 3 * num_freqs  # 39
 
         self.net = nn.Sequential(
@@ -116,10 +125,9 @@ class DisplacementMLP(nn.Module):
 
     def forward(self, verts):
         encoded = self.enc(verts)
-        # displacement scale of 0.1 allows for significant shape changes while preventing extreme distortions
-        return verts + 0.1 * self.net(encoded)
+        return verts + self.displacement_scale * self.net(encoded) #uses displacement scale to control max deformation from original mesh
 
-mlp = DisplacementMLP(num_freqs=6).to(device)
+mlp = DisplacementMLP(num_freqs=6, displacement_scale=0.03).to(device)
 optimiser = torch.optim.Adam(mlp.parameters(), lr=5e-4)
 scheduler = torch.optim.lr_scheduler.StepLR(optimiser, step_size=400, gamma=0.6)
 
@@ -169,19 +177,11 @@ def get_renderer(elev=0, azim=0):
 # ------------------------------- Regularisation Losses -------------------------------
 
 #penalises large differences between connected vertices to preserve smoothness and prevent mesh collapse/explosion
-def laplacian_smoothness_loss(verts, faces):
-    # collect all edges from faces
-    edges = torch.cat([
-        faces[:, [0, 1]],
-        faces[:, [1, 2]],
-        faces[:, [0, 2]],
-    ], dim=0)  # [3F, 2]
+def laplacian_smoothness_loss(verts, edges):
+    v_src = verts[edges[:, 0]]  # [E, 3] - v_src is the source vertex of each edge
+    v_dst = verts[edges[:, 1]]  # [E, 3] - v_dst is the destination vertex of each edge
+    return ((v_src - v_dst) ** 2).mean()
     
-    v_src = verts[edges[:, 0]]
-    v_dst = verts[edges[:, 1]]
-    
-    # penalise difference between connected vertices
-    return (v_src - v_dst).pow(2).mean()
 
 #penalises large displacements from the original mesh to preserve human topology
 # - allows for armor-scale shape changes while preventing collapse or explosion of the mesh
@@ -195,24 +195,24 @@ num_steps = 1500
 eps = 1e-8
 viewpoints = [(20, 0), (20, 90), (20, 180), (20, 270), (60, 45), (-10, 45), (90, 0)]
 
+#sanity check for Laplacian before training:
+with torch.no_grad():
+    test_lap = laplacian_smoothness_loss(verts_init, edges)
+    print(f"Laplacian sanity check on verts_init: {test_lap.item():.6f}  (should be > 0)")
+
 for step in range(num_steps):
 
     optimiser.zero_grad()
 
-    # get displaced vertices from MLP
+    #get displaced vertices from MLP
     verts = mlp(verts_init)
 
-    # white vertex colours - shape only, no colour signal
+    #white vertex colours - shape only, no colour signal
     verts_rgb = torch.ones_like(verts).unsqueeze(0)
     textures = TexturesVertex(verts_features=verts_rgb)
+    mesh_obj = Meshes(verts=[verts], faces=[faces], textures=textures)
 
-    mesh_obj = Meshes(
-        verts=[verts],
-        faces=[faces],
-        textures=textures
-    )
-
-    # CLIP loss across multiple viewpoints with augmented crops
+    #CLIP loss across multiple viewpoints with augmented crops
     clip_loss = 0
     for elev, azim in viewpoints:
         r = get_renderer(elev, azim)
@@ -226,22 +226,22 @@ for step in range(num_steps):
 
         img_feats = clip_model.encode_image(crops)
         img_feats = img_feats / (img_feats.norm(dim=-1, keepdim=True) + eps)
-        clip_loss += (1 - torch.cosine_similarity(img_feats, text_feat.expand(8, -1))).mean()
+        clip_loss = clip_loss + (1 - torch.cosine_similarity(img_feats, text_feat.expand(8, -1))).mean()
 
-    clip_loss /= len(viewpoints)
+    clip_loss = clip_loss / len(viewpoints)
 
     #regularisation losses to preserve human mesh topology
-    lap_loss = laplacian_smoothness_loss(verts, faces)
+    lap_loss = laplacian_smoothness_loss(verts, edges)
     disp_loss = displacement_regularisation(verts, verts_init)
 
     #centroid loss keeps mesh centered at origin
     centroid_loss = (verts.mean(dim=0) ** 2).sum()
 
     #displacement reg starts strong then decays to allow more deformation later
-    disp_weight = 1.0 * (0.1 ** (step / num_steps))
+    disp_weight = 5.0 * (0.1 ** (step / num_steps))
     
     #combine - CLIP drives shape, regularisation preserves topology
-    loss = clip_loss + 0.05 * lap_loss + disp_weight * disp_loss + 0.01 * centroid_loss
+    loss = clip_loss + 2.0 * lap_loss + disp_weight * disp_loss + 0.01 * centroid_loss
 
     loss.backward()
     torch.nn.utils.clip_grad_norm_(mlp.parameters(), max_norm=1.0)
@@ -254,9 +254,9 @@ for step in range(num_steps):
         Image.fromarray(rendered).save(os.path.join(output_dir, f"render_{step}.png"))
 
     if step % 20 == 0:
-        print(f"Step {step:4d} | Loss: {loss.item():.4f} | CLIP: {clip_loss.item():.4f} | Lap: {lap_loss.item():.4f} | Disp: {disp_loss.item():.4f}")
+        print(f"Step {step:4d} | Loss: {loss.item():.4f} | CLIP: {clip_loss.item():.6f} | Lap: {lap_loss.item():.6f} | Disp: {disp_loss.item():.4f}")
 
-#final render
+#saving final render
 rendered = get_renderer(20, 0)(mesh_obj)[0, ..., :3].detach().cpu().numpy()
 rendered = (rendered * 255).astype(np.uint8)
 Image.fromarray(rendered).save(os.path.join(output_dir, f"render_{num_steps}.png"))
