@@ -127,7 +127,7 @@ class DisplacementMLP(nn.Module):
         encoded = self.enc(verts)
         return verts + self.displacement_scale * self.net(encoded) #uses displacement scale to control max deformation from original mesh
 
-mlp = DisplacementMLP(num_freqs=6, displacement_scale=0.03).to(device)
+mlp = DisplacementMLP(num_freqs=6, displacement_scale=0.05).to(device)
 optimiser = torch.optim.Adam(mlp.parameters(), lr=5e-4)
 scheduler = torch.optim.lr_scheduler.StepLR(optimiser, step_size=400, gamma=0.6)
 
@@ -178,15 +178,29 @@ def get_renderer(elev=0, azim=0):
 
 #penalises large differences between connected vertices to preserve smoothness and prevent mesh collapse/explosion
 def laplacian_smoothness_loss(verts, edges):
-    v_src = verts[edges[:, 0]]  # [E, 3] - v_src is the source vertex of each edge
-    v_dst = verts[edges[:, 1]]  # [E, 3] - v_dst is the destination vertex of each edge
-    return ((v_src - v_dst) ** 2).mean()
+    v_src = verts[edges[:, 0]]  #v_src is the source vertex of each edge
+    v_dst = verts[edges[:, 1]]  #v_dst is the destination vertex of each edge
+    #Normalise by mean squared edge length of original mesh
+    #so the loss is dimensionless and scale-independent
+    diff = (v_src - v_dst) ** 2
+    mean_sq_edge_length = diff.detach().mean().clamp(min=1e-8) 
+    return diff.mean() / mean_sq_edge_length
     
 
 #penalises large displacements from the original mesh to preserve human topology
 # - allows for armor-scale shape changes while preventing collapse or explosion of the mesh
 def displacement_regularisation(verts, verts_init):
     return ((verts - verts_init) ** 2).mean()
+
+def normal_consistency_loss(verts, faces):
+    #compute per-face normals
+    v0 = verts[faces[:, 0]]
+    v1 = verts[faces[:, 1]]
+    v2 = verts[faces[:, 2]]
+    normals = torch.cross(v1 - v0, v2 - v0, dim=1)
+    normals = normals / (normals.norm(dim=1, keepdim=True) + 1e-8)
+    
+    return normals.var(dim=0).mean()
 
 
 # ------------------------------- Optimisation Loop -------------------------------
@@ -233,6 +247,7 @@ for step in range(num_steps):
     #regularisation losses to preserve human mesh topology
     lap_loss = laplacian_smoothness_loss(verts, edges)
     disp_loss = displacement_regularisation(verts, verts_init)
+    norm_consist_loss = normal_consistency_loss(verts, faces)
 
     #centroid loss keeps mesh centered at origin
     centroid_loss = (verts.mean(dim=0) ** 2).sum()
@@ -241,7 +256,7 @@ for step in range(num_steps):
     disp_weight = 5.0 * (0.1 ** (step / num_steps))
     
     #combine - CLIP drives shape, regularisation preserves topology
-    loss = clip_loss + 2.0 * lap_loss + disp_weight * disp_loss + 0.01 * centroid_loss
+    loss = clip_loss + 0.3 * lap_loss + disp_weight * disp_loss + 0.01 * centroid_loss - 0.05 * norm_consist_loss
 
     loss.backward()
     torch.nn.utils.clip_grad_norm_(mlp.parameters(), max_norm=1.0)
