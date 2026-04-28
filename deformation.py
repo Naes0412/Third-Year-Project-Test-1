@@ -48,12 +48,27 @@ device = torch.device("cuda")
 clip_model, clip_preprocess = clip.load("ViT-B/16", device=device)
 clip_model.eval()
 
-text_prompt = "Iron Man armor suit, metallic red and gold, superhero"
+base_prompt = "3D render of Iron Man armor, armored suit silhouette, chest plate protrusion, helmet"
 
-text_tokens = clip.tokenize([text_prompt]).to(device)
+#View-dependent prompts inspired by DreamFusion (Poole et al., 2022)
+# Each viewpoint gets a direction-specific suffix appended to the base prompt
+viewpoint_prompts = {
+    (20, 0): f"{base_prompt}, front view, chest plate",
+    (20, 90): f"{base_prompt}, side view, shoulder pauldron",
+    (20, 180): f"{base_prompt}, back view, back plate",
+    (20, 270): f"{base_prompt}, side view, shoulder pauldron",
+    (60, 45): f"{base_prompt}, overhead view, helmet",
+    (-10, 45): f"{base_prompt}, low angle view, boots",
+    (90, 0): f"{base_prompt}, top down view, helmet faceplate",
+}
+
+text_feats = {}
 with torch.no_grad():
-    text_feat = clip_model.encode_text(text_tokens)
-    text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
+    for vp, prompt in viewpoint_prompts.items():
+        tokens = clip.tokenize([prompt]).to(device)
+        feat = clip_model.encode_text(tokens)
+        text_feats[vp] = feat / feat.norm(dim=-1, keepdim=True)
+        print(f"Encoded text prompt for viewpoint {vp}: '{prompt}'")
 
 
 # ------------------------------- Load Mesh -------------------------------
@@ -229,6 +244,7 @@ for step in range(num_steps):
     #CLIP loss across multiple viewpoints with augmented crops
     clip_loss = 0
     for elev, azim in viewpoints:
+        text_feat_vp = text_feats[(elev, azim)] #get pre-encoded text feature for this viewpoint
         r = get_renderer(elev, azim)
         images = r(mesh_obj)
         image = images[0, ..., :3].permute(2, 0, 1)  # [3, 512, 512]
@@ -240,7 +256,7 @@ for step in range(num_steps):
 
         img_feats = clip_model.encode_image(crops)
         img_feats = img_feats / (img_feats.norm(dim=-1, keepdim=True) + eps)
-        clip_loss = clip_loss + (1 - torch.cosine_similarity(img_feats, text_feat.expand(8, -1))).mean()
+        clip_loss = clip_loss + (1 - torch.cosine_similarity(img_feats, text_feat_vp.expand(8, -1))).mean()
 
     clip_loss = clip_loss / len(viewpoints)
 
@@ -256,7 +272,7 @@ for step in range(num_steps):
     disp_weight = 5.0 * (0.1 ** (step / num_steps))
     
     #combine - CLIP drives shape, regularisation preserves topology
-    loss = clip_loss + 0.3 * lap_loss + disp_weight * disp_loss + 0.01 * centroid_loss - 0.05 * norm_consist_loss
+    loss = clip_loss + 0.3 * lap_loss + disp_weight * disp_loss + 0.01 * centroid_loss # - 0.05 * norm_consist_loss
 
     loss.backward()
     torch.nn.utils.clip_grad_norm_(mlp.parameters(), max_norm=1.0)

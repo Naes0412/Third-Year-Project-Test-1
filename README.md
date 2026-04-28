@@ -1,4 +1,4 @@
-## Installation
+## Installation (WIP)
 
 ### ----- Option 1 - Vast.ai -----
 
@@ -25,7 +25,7 @@ bash setup.sh
 > Change to `8.9` if using an RTX 4090.
 
 ### 5. Run
-python main_gpu.py
+python [combined file name here].py
 
 ### ----- Option 2 - Google Colab -----
 
