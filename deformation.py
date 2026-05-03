@@ -95,14 +95,6 @@ print(f"Mesh loaded: {verts_init.shape[0]} vertices, {faces.shape[0]} faces")
 print(f"Y range: {verts_init[:, 1].min().item():.3f} to {verts_init[:, 1].max().item():.3f}")
 print(f"X range: {verts_init[:, 0].min().item():.3f} to {verts_init[:, 0].max().item():.3f}")
 
-#precompute edges for Laplacian loss
-edges = torch.cat([
-    faces[:, [0, 1]],
-    faces[:, [1, 2]],
-    faces[:, [0, 2]],
-], dim=0)  # [3F, 2]
-print(f"Edges tensor shape: {edges.shape[0]}, dtype: {edges.dtype}")
-
 
 # ------------------------------- Fourier Encoding -------------------------------
 
@@ -144,9 +136,13 @@ class DisplacementMLP(nn.Module):
 
     def forward(self, verts):
         encoded = self.enc(verts)
-        return verts + self.displacement_scale * self.net(encoded) #uses displacement scale to control max deformation from original mesh
+        raw = self.net(encoded)
+        y = verts[:, 1:2]
+        torso_mask = (y.abs() < 0.3).float()
+        scale = 0.03 + 0.04 * torso_mask  # allow more deformation in torso region, less in extremities
+        return verts + scale * raw
 
-mlp = DisplacementMLP(num_freqs=6, displacement_scale=0.05).to(device)
+mlp = DisplacementMLP(num_freqs=6).to(device)
 optimiser = torch.optim.Adam(mlp.parameters(), lr=5e-4)
 scheduler = torch.optim.lr_scheduler.StepLR(optimiser, step_size=400, gamma=0.6)
 
@@ -195,20 +191,23 @@ def get_renderer(elev=0, azim=0):
 
 # ------------------------------- Regularisation Losses -------------------------------
 
-with torch.no_grad():
-    v_src_init = verts_init[edges[:, 0]]
-    v_dst_init = verts_init[edges[:, 1]]
-    mean_sq_edge_length_init = ((v_src_init - v_dst_init) ** 2).mean().clamp(min=1e-8)
-    print(f"Mean sq edge length (init): {mean_sq_edge_length_init.item():.8f}")
-
-#penalises large differences between connected vertices to preserve smoothness and prevent mesh collapse/explosion
-def laplacian_smoothness_loss(verts, edges, mean_sq_edge_length_init):
-    v_src = verts[edges[:, 0]]  #v_src is the source vertex of each edge
-    v_dst = verts[edges[:, 1]]  #v_dst is the destination vertex of each edge
-    #Normalise by mean squared edge length of original mesh
-    #so the loss is dimensionless and scale-independent
-    diff = (v_src - v_dst) ** 2
-    return diff.mean() / mean_sq_edge_length_init
+def laplacian_smoothness_loss(verts, faces):
+    # Build adjacency: for each vertex, get mean of neighbour positions
+    v0 = verts[faces[:, 0]]
+    v1 = verts[faces[:, 1]]  
+    v2 = verts[faces[:, 2]]
+    
+    # Accumulate neighbour sums
+    neighbour_sum = torch.zeros_like(verts)
+    neighbour_count = torch.zeros(verts.shape[0], 1, device=verts.device)
+    
+    for i, j in [(0,1),(0,2),(1,0),(1,2),(2,0),(2,1)]:
+        neighbour_sum.index_add_(0, faces[:,i], verts[faces[:,j]])
+        neighbour_count.index_add_(0, faces[:,i], torch.ones(faces.shape[0],1,device=verts.device))
+    
+    neighbour_mean = neighbour_sum / neighbour_count.clamp(min=1)
+    # Laplacian: how far each vertex is from its neighbours' mean
+    return ((verts - neighbour_mean)**2).mean()
     
 
 #penalises large displacements from the original mesh to preserve human topology
@@ -239,8 +238,8 @@ viewpoints = [(20, 0), (20, 90), (20, 180), (20, 270), (60, 45), (-10, 45), (90,
 
 #sanity check for Laplacian before training:
 with torch.no_grad():
-    test_lap = laplacian_smoothness_loss(verts_init, edges, mean_sq_edge_length_init)
-    print(f"Laplacian sanity check on verts_init: {test_lap.item():.6f}  (should be ~1.0)")
+    test_lap = laplacian_smoothness_loss(verts_init, faces)
+    print(f"Laplacian sanity check on verts_init: {test_lap.item():.8f}")
 
 for step in range(num_steps):
 
@@ -274,7 +273,7 @@ for step in range(num_steps):
     clip_loss = clip_loss / len(viewpoints)
 
     #regularisation losses to preserve human mesh topology
-    lap_loss = laplacian_smoothness_loss(verts, edges, mean_sq_edge_length_init)
+    lap_loss = laplacian_smoothness_loss(verts, faces)
     disp_loss = displacement_regularisation(verts, verts_init)
     norm_consist_loss = normal_consistency_loss(verts, faces)
 
@@ -285,7 +284,7 @@ for step in range(num_steps):
     disp_weight = 8.0 * (0.1 ** (step / num_steps))
     
     #combine - CLIP drives shape, regularisation preserves topology
-    loss = clip_loss + 0.3 * lap_loss + disp_weight * disp_loss + 0.01 * centroid_loss + 0.05 * norm_consist_loss
+    loss = clip_loss + 1.0 * lap_loss + disp_weight * disp_loss + 0.01 * centroid_loss # + 0.05 * norm_consist_loss
 
     loss.backward()
     max_norm = 0.25 if step < 500 else 1.0 #tighter clipping early on to prevent divergence, then relax to allow finer details
@@ -299,7 +298,7 @@ for step in range(num_steps):
         Image.fromarray(rendered).save(os.path.join(output_dir, f"render_{step}.png"))
 
     if step % 20 == 0:
-        print(f"Step {step:4d} | Loss: {loss.item():.4f} | CLIP: {clip_loss.item():.6f} | Lap: {lap_loss.item():.6f} | Disp: {disp_loss.item():.6f} | Norm: {norm_consist_loss.item():.6f}")
+        print(f"Step {step:4d} | Loss: {loss.item():.4f} | CLIP: {clip_loss.item():.6f} | Lap: {lap_loss.item():.6f} | Disp: {disp_loss.item():.6f}")
 
 #saving final render
 rendered = get_renderer(20, 0)(mesh_obj)[0, ..., :3].detach().cpu().numpy()
