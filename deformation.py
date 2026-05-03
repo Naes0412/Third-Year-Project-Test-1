@@ -13,7 +13,7 @@ import numpy as np
 from PIL import Image
 import torchvision.transforms.functional as TF
 import torchvision.transforms as T
-# PyTorch3D imports
+#PyTorch3D imports
 from pytorch3d.structures import Meshes
 from pytorch3d.renderer import (
     FoVPerspectiveCameras,
@@ -29,10 +29,10 @@ from pytorch3d.renderer import (
 import os
 import warnings
 import logging
-# Suppress the PyTorch3D bin size warning
+#suppress the PyTorch3D bin size warning
 logging.getLogger("pytorch3d").setLevel(logging.ERROR)
 
-# Ensure output directory exists
+#ensure output directory exists
 output_dir = "outputs_deformation"
 if os.path.exists(output_dir):
     for f in os.listdir(output_dir):
@@ -55,7 +55,7 @@ clip_model.eval()
 base_prompt = "3D render of Iron Man armor, armored suit silhouette, chest plate protrusion, helmet"
 
 #View-dependent prompts inspired by DreamFusion (Poole et al., 2022)
-# Each viewpoint gets a direction-specific suffix appended to the base prompt
+# - each viewpoint gets a direction-specific suffix appended to the base prompt
 viewpoint_prompts = {
     (20, 0): f"{base_prompt}, front view, chest plate",
     (20, 90): f"{base_prompt}, side view, shoulder pauldron",
@@ -125,7 +125,7 @@ class FourierEncoding(nn.Module):
 # ------------------------------- Displacement MLP -------------------------------
 
 class DisplacementMLP(nn.Module):
-    def __init__(self, num_freqs=6, displacement_scale=0.03):
+    def __init__(self, num_freqs=6, displacement_scale=0.07):
         super().__init__()
         self.enc = FourierEncoding(num_freqs)
         self.displacement_scale = displacement_scale
@@ -282,13 +282,14 @@ for step in range(num_steps):
     centroid_loss = (verts.mean(dim=0) ** 2).sum()
 
     #displacement reg starts strong then decays to allow more deformation later
-    disp_weight = 5.0 * (0.1 ** (step / num_steps))
+    disp_weight = 8.0 * (0.1 ** (step / num_steps))
     
     #combine - CLIP drives shape, regularisation preserves topology
-    loss = clip_loss + 0.3 * lap_loss + disp_weight * disp_loss + 0.01 * centroid_loss # - 0.05 * norm_consist_loss
+    loss = clip_loss + 0.3 * lap_loss + disp_weight * disp_loss + 0.01 * centroid_loss + 0.05 * norm_consist_loss
 
     loss.backward()
-    torch.nn.utils.clip_grad_norm_(mlp.parameters(), max_norm=1.0)
+    max_norm = 0.25 if step < 500 else 1.0 #tighter clipping early on to prevent divergence, then relax to allow finer details
+    torch.nn.utils.clip_grad_norm_(mlp.parameters(), max_norm=max_norm)
     optimiser.step()
     scheduler.step()
 
@@ -298,7 +299,7 @@ for step in range(num_steps):
         Image.fromarray(rendered).save(os.path.join(output_dir, f"render_{step}.png"))
 
     if step % 20 == 0:
-        print(f"Step {step:4d} | Loss: {loss.item():.4f} | CLIP: {clip_loss.item():.6f} | Lap: {lap_loss.item():.6f} | Disp: {disp_loss.item():.6f}")
+        print(f"Step {step:4d} | Loss: {loss.item():.4f} | CLIP: {clip_loss.item():.6f} | Lap: {lap_loss.item():.6f} | Disp: {disp_loss.item():.6f} | Norm: {norm_consist_loss.item():.6f}")
 
 #saving final render
 rendered = get_renderer(20, 0)(mesh_obj)[0, ..., :3].detach().cpu().numpy()
