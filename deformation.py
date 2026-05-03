@@ -13,7 +13,6 @@ import numpy as np
 from PIL import Image
 import torchvision.transforms.functional as TF
 import torchvision.transforms as T
-import pymeshlab
 #PyTorch3D imports
 from pytorch3d.structures import Meshes
 from pytorch3d.renderer import (
@@ -84,16 +83,16 @@ with torch.no_grad():
 
 # ------------------------------- Load Mesh -------------------------------
 
-#remesh input model to get more vertices for deformation
-ms = pymeshlab.MeshSet()
-ms.load_new_mesh("male_human.obj")
-ms.meshing_isotropic_explicit_remeshing(iterations=5, targetlen=pymeshlab.Percentage(1.5))
-remeshed_path = "male_human_remeshed.obj"
-ms.save_current_mesh(remeshed_path)
-mesh_input = trimesh.load(remeshed_path)
+#load mesh
+mesh_input = trimesh.load("male_human.obj")
+
+#if it's a scene, concatenate into a single mesh
 if isinstance(mesh_input, trimesh.Scene):
     mesh_input = trimesh.util.concatenate(mesh_input.dump())
-print(f"Remeshed: {len(mesh_input.vertices)} vertices, {len(mesh_input.faces)} faces")
+    
+#remesh to reduce vertex count, reducing non-uniform density and speeding up optimisation
+mesh_input = mesh_input.simplify_quadric_decimation(face_count=15000)
+print(f"Decimated: {len(mesh_input.vertices)} vertices, {len(mesh_input.faces)} faces")
 
 #center and scale to unit size
 mesh_input.vertices -= mesh_input.centroid
