@@ -13,6 +13,7 @@ import numpy as np
 from PIL import Image
 import torchvision.transforms.functional as TF
 import torchvision.transforms as T
+import pymeshlab
 #PyTorch3D imports
 from pytorch3d.structures import Meshes
 from pytorch3d.renderer import (
@@ -73,15 +74,26 @@ with torch.no_grad():
         feat = clip_model.encode_text(tokens)
         text_feats[vp] = feat / feat.norm(dim=-1, keepdim=True)
         print(f"Encoded text prompt for viewpoint {vp}: '{prompt}'")
+        
+with torch.no_grad():
+    neg_prompt = "a plain human body, smooth skin, no armor, naked"
+    neg_tokens = clip.tokenize([neg_prompt]).to(device)
+    neg_feat = clip_model.encode_text(neg_tokens)
+    neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
 
 
 # ------------------------------- Load Mesh -------------------------------
 
-mesh_input = trimesh.load("male_human.obj")
-
-#handle scene vs mesh
+#remesh input model to get more vertices for deformation
+ms = pymeshlab.MeshSet()
+ms.load_new_mesh("male_human.obj")
+ms.meshing_isotropic_explicit_remeshing(iterations=5, targetlen=pymeshlab.Percentage(1.5))
+remeshed_path = "male_human_remeshed.obj"
+ms.save_current_mesh(remeshed_path)
+mesh_input = trimesh.load(remeshed_path)
 if isinstance(mesh_input, trimesh.Scene):
     mesh_input = trimesh.util.concatenate(mesh_input.dump())
+print(f"Remeshed: {len(mesh_input.vertices)} vertices, {len(mesh_input.faces)} faces")
 
 #center and scale to unit size
 mesh_input.vertices -= mesh_input.centroid
@@ -208,6 +220,10 @@ def laplacian_smoothness_loss(verts, faces):
     neighbour_mean = neighbour_sum / neighbour_count.clamp(min=1)
     # Laplacian: how far each vertex is from its neighbours' mean
     return ((verts - neighbour_mean)**2).mean()
+
+with torch.no_grad():
+    lap_baseline = laplacian_smoothness_loss(verts_init, faces).clamp(min=1e-12)
+    print(f"Laplacian baseline: {lap_baseline.item():.8f}")
     
 
 #penalises large displacements from the original mesh to preserve human topology
@@ -260,6 +276,8 @@ for step in range(num_steps):
         r = get_renderer(elev, azim)
         images = r(mesh_obj)
         image = images[0, ..., :3].permute(2, 0, 1)  # [3, 512, 512]
+        alpha = images[0, ..., 3]
+        image = image * alpha.unsqueeze(0)  #apply alpha to RGB channels, background = black
 
         crops = get_augmented_crops(image, n_crops=8)
         crops = TF.normalize(crops,
@@ -268,12 +286,14 @@ for step in range(num_steps):
 
         img_feats = clip_model.encode_image(crops)
         img_feats = img_feats / (img_feats.norm(dim=-1, keepdim=True) + eps)
-        clip_loss = clip_loss + (1 - torch.cosine_similarity(img_feats, text_feat_vp.expand(8, -1))).mean()
+        pos_sim = torch.cosine_similarity(img_feats, text_feat_vp.expand(8, -1))
+        neg_sim = torch.cosine_similarity(img_feats, neg_feat.expand(8, -1))
+        clip_loss = clip_loss + (1 - pos_sim + neg_sim).mean() #encourage similarity to target prompt (armour) and dissimilarity to negative prompt (plain body)
 
     clip_loss = clip_loss / len(viewpoints)
 
     #regularisation losses to preserve human mesh topology
-    lap_loss = laplacian_smoothness_loss(verts, faces)
+    lap_loss = laplacian_smoothness_loss(verts, faces) / lap_baseline  #normalise by initial mesh Laplacian to keep scale consistent
     disp_loss = displacement_regularisation(verts, verts_init)
     norm_consist_loss = normal_consistency_loss(verts, faces)
 
