@@ -20,7 +20,7 @@ from pytorch3d.renderer import (
     MeshRenderer,
     MeshRasterizer,
     SoftPhongShader,
-    PointLights,
+    AmbientLights,
     TexturesVertex,
     look_at_view_transform
 )
@@ -213,13 +213,7 @@ def get_renderer(elev=0, azim=0):
         blur_radius=0.0,
         faces_per_pixel=1,
     )
-    lights = PointLights(
-        device=device,
-        location=[[2.0, 2.0, -2.0]],
-        ambient_color=[[0.8, 0.8, 0.8]],
-        diffuse_color=[[0.2, 0.2, 0.2]],
-        specular_color=[[0.0, 0.0, 0.0]]
-    )
+    lights = AmbientLights(device=device, ambient_color=((0.8, 0.8, 0.8),))
     renderer = MeshRenderer(
         rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings),
         shader=SoftPhongShader(device=device, cameras=cameras, lights=lights)
