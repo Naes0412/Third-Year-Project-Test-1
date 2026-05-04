@@ -1,6 +1,6 @@
-## Installation (WIP)
+## Installation
 
-### ----- Option 1 - Vast.ai -----
+<!-- ### ----- Option 1 - Vast.ai -----
 
 Tested on: RTX 3090 (sm_86) / RTX 4090 (sm_89), CUDA 12.x, Python 3.12
 
@@ -25,8 +25,12 @@ bash setup.sh
 > Change to `8.9` if using an RTX 4090.
 
 ### 5. Run
-python [combined file name here].py
+python combined.py -->
 
-### ----- Option 2 - Google Colab -----
+### ----- Google Colab -----
 
-TBA
+1. Open the "Final-Year-Project.iypnb" Colab file.
+
+2. Run the cells with the git clone and installation steps.
+
+3. Then run the intended file you want to see the results of.

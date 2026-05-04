@@ -149,7 +149,7 @@ class DisplacementMLP(nn.Module):
         y = verts[:, 1:2]
         torso_mask = (y.abs() < 0.3).float()
         extremity_mask = ((y < -0.38) | (y > 0.42)).float() #feet and head
-        scale = 0.01 * extremity_mask + 0.02 * (1 - torso_mask - extremity_mask).clamp(min=0) + 0.07 * torso_mask
+        scale = 0.01 * extremity_mask + 0.02 * (1 - torso_mask - extremity_mask).clamp(min=0) + 0.04 * torso_mask
         return verts + scale * raw
 
 
@@ -328,7 +328,7 @@ for step in range(num_steps):
             + disp_weight * disp_loss
             + 0.01 * centroid_loss
             + 0.1 * colour_smooth_loss
-            + 0.05 * sat_loss)
+            + 0.15 * sat_loss)
 
     loss.backward()
 
