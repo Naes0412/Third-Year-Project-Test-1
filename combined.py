@@ -291,10 +291,9 @@ for step in range(num_steps):
         images = r(mesh_obj)
         image = images[0, ..., :3].permute(2, 0, 1)  # [3, 512, 512]
 
-        #black background: background pixels set to 0 via alpha mask
-        # - gives CLIP a cleaner silhouette signal than white-on-white
         alpha = images[0, ..., 3]
-        image = image * alpha.unsqueeze(0)
+        background = torch.ones_like(image) * 0.5 #grey background
+        image = image * alpha.unsqueeze(0) + background * (1 - alpha.unsqueeze(0))
 
         crops = get_augmented_crops(image, n_crops=8)
         crops = TF.normalize(crops,
