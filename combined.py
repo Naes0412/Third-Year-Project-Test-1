@@ -148,7 +148,8 @@ class DisplacementMLP(nn.Module):
         raw = self.net(encoded)
         y = verts[:, 1:2]
         torso_mask = (y.abs() < 0.3).float()
-        scale = 0.03 + 0.04 * torso_mask
+        extremity_mask = ((y < -0.38) | (y > 0.42)).float() #feet and head
+        scale = 0.02 + 0.05 * torso_mask
         return verts + scale * raw
 
 
@@ -215,9 +216,9 @@ def get_renderer(elev=0, azim=0):
     lights = PointLights(
         device=device,
         location=[[2.0, 2.0, -2.0]],
-        ambient_color=[[0.4, 0.4, 0.4]],
-        diffuse_color=[[0.6, 0.6, 0.6]],
-        specular_color=[[0.2, 0.2, 0.2]]
+        ambient_color=[[0.8, 0.8, 0.8]],
+        diffuse_color=[[0.2, 0.2, 0.2]],
+        specular_color=[[0.0, 0.0, 0.0]]
     )
     renderer = MeshRenderer(
         rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings),
