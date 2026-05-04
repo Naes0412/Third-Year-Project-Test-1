@@ -286,10 +286,6 @@ for step in range(num_steps):
         images = r(mesh_obj)
         image = images[0, ..., :3].permute(2, 0, 1)  # [3, 512, 512]
 
-        alpha = images[0, ..., 3]
-        background = torch.ones_like(image) * 0.5 #grey background
-        image = image * alpha.unsqueeze(0) + background * (1 - alpha.unsqueeze(0))
-
         crops = get_augmented_crops(image, n_crops=8)
         crops = TF.normalize(crops,
                              mean=[0.48145466, 0.4578275,  0.40821073],
@@ -313,6 +309,7 @@ for step in range(num_steps):
     #colour regularisation
     colour_smooth_loss = colour_smoothness_loss(verts_rgb, faces)
     sat_loss = saturation_loss(verts_rgb)
+    sat_weight = 0.05 * (0.3 ** (step / num_steps))  #decay saturation loss weight over time to allow more colour freedom later on
 
     disp_weight = 8.0 * (0.1 ** (step / num_steps))
 
@@ -322,7 +319,7 @@ for step in range(num_steps):
             + disp_weight * disp_loss
             + 0.01 * centroid_loss
             + 0.1 * colour_smooth_loss
-            + 0.15 * sat_loss)
+            + sat_weight * sat_loss)
 
     loss.backward()
 
