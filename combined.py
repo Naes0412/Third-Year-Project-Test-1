@@ -53,18 +53,18 @@ clip_model.eval()
 
 #Single prompt covering both shape and colour — combined script can use colour words
 # - because PointLights rendering makes colour visible to CLIP (unlike white-mesh deformation alone)
-base_prompt = "a 3D render of Iron Man armor, red metallic chest plate, gold legs and arms, armored suit silhouette, superhero"
+base_prompt = "a 3D render of Iron Man armor, red and gold metallic suit, superhero"
 
 #View-dependent prompts inspired by DreamFusion (Poole et al., NeurIPS 2022)
 # - direction suffixes reduce the Janus problem and give CLIP per-view shape+colour signal
 viewpoint_prompts = {
-    (20, 0):   f"{base_prompt}, front view, red chest plate arc reactor",
-    (20, 90):  f"{base_prompt}, side view, gold shoulder pauldron",
-    (20, 180): f"{base_prompt}, back view, red and gold back plate",
-    (20, 270): f"{base_prompt}, side view, gold shoulder pauldron",
+    (20, 0):   f"{base_prompt}, front view, red chest plate",
+    (20, 90):  f"{base_prompt}, side view, gold arm",
+    (20, 180): f"{base_prompt}, back view, red and gold back",
+    (20, 270): f"{base_prompt}, side view, gold arm",
     (60, 45):  f"{base_prompt}, overhead view, red helmet",
-    (-10, 45): f"{base_prompt}, low angle view, gold boots",
-    (90, 0):   f"{base_prompt}, top down view, red helmet faceplate",
+    (-10, 45): f"{base_prompt}, low angle view, gold legs",
+    (90, 0):   f"{base_prompt}, top down view, red helmet",
 }
 
 #precompute all text features once before training
@@ -78,7 +78,7 @@ with torch.no_grad():
 
 #negative prompt: push away from plain unarmoured human appearance
 with torch.no_grad():
-    neg_tokens = clip.tokenize(["a plain human body, smooth skin, no armor, naked"]).to(device)
+    neg_tokens = clip.tokenize(["a plain human body, smooth skin, no armor, black suit, dark clothing"]).to(device)
     neg_feat = clip_model.encode_text(neg_tokens)
     neg_feat = neg_feat / neg_feat.norm(dim=-1, keepdim=True)
     print("Encoded negative prompt.")
@@ -159,7 +159,7 @@ class DisplacementMLP(nn.Module):
         scale = (0.01 * extremity_mask 
                  + 0.01 * arm_mask
                  + 0.02 * (1 - torso_mask - arm_mask - extremity_mask).clamp(min=0) 
-                 + 0.04 * torso_mask)
+                 + 0.08 * torso_mask)
         return verts + scale * raw * normals
 
 
@@ -294,7 +294,10 @@ for step in range(num_steps):
         text_feat_vp = text_feats[(elev, azim)]
         r = get_renderer(elev, azim)
         images = r(mesh_obj)
-        image = images[0, ..., :3].permute(2, 0, 1)  # [3, 512, 512]
+        image = images[0, ..., :3].permute(2, 0, 1)
+        alpha = images[0, ..., 3]
+        background = torch.ones_like(image) #white background to make colours visible to CLIP
+        image = image * alpha.unsqueeze(0) + background * (1 - alpha.unsqueeze(0))
 
         crops = get_augmented_crops(image, n_crops=8)
         crops = TF.normalize(crops,
@@ -321,7 +324,7 @@ for step in range(num_steps):
     sat_loss = saturation_loss(verts_rgb)
     
     sat_weight = 0.05 * (0.3 ** (step / num_steps))  #decay saturation loss weight over time to allow more colour freedom later on
-    disp_weight = 8.0 * (0.1 ** (step / num_steps)) #decay displacement regularisation weight
+    disp_weight = 3.0 * (0.1 ** (step / num_steps)) #decay displacement regularisation weight
     colour_smooth_weight = 0.5 * (0.1 ** (step / num_steps))  #decay colour smoothness weight
 
     #Combined loss
