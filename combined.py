@@ -203,14 +203,14 @@ colour_scheduler = torch.optim.lr_scheduler.StepLR(colour_optimiser, step_size=5
 def get_augmented_crops(image, n_crops=8):
     crops = []
     _, h, w = image.shape
-    min_size = min(h, w) // 2
+    min_size = int(min(h, w) * 0.7)  #minimum crop size is 70% of original, less background & more mesh in crops
     for _ in range(n_crops):
-        scale = torch.FloatTensor(1).uniform_(0.5, 1.0).item()
+        scale = torch.FloatTensor(1).uniform_(0.7, 1.0).item()
         size = int(min_size + scale * (min(h, w) - min_size))
         crop = T.RandomCrop(size)(image)
         crop = TF.resize(crop.unsqueeze(0), [224, 224])
         crops.append(crop)
-    return torch.cat(crops, dim=0)  # [n_crops, 3, 224, 224]
+    return torch.cat(crops, dim=0)
 
 
 # ------------------------------- Renderer -------------------------------
@@ -296,7 +296,7 @@ for step in range(num_steps):
         images = r(mesh_obj)
         image = images[0, ..., :3].permute(2, 0, 1)
         alpha = images[0, ..., 3]
-        background = torch.ones_like(image) #white background to make colours visible to CLIP
+        background = torch.ones_like(image) * 0.5 #grey background
         image = image * alpha.unsqueeze(0) + background * (1 - alpha.unsqueeze(0))
 
         crops = get_augmented_crops(image, n_crops=8)
