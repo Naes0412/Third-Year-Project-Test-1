@@ -100,6 +100,8 @@ mesh_input.vertices *= scale
 
 verts_init = torch.tensor(mesh_input.vertices, dtype=torch.float32, device=device)
 faces = torch.tensor(mesh_input.faces, dtype=torch.int64, device=device)
+mesh_for_normals = Meshes(verts=[verts_init], faces=[faces])
+verts_normals = mesh_for_normals.verts_normals_packed().detach()
 
 print(f"Mesh: {verts_init.shape[0]} vertices, {faces.shape[0]} faces")
 print(f"Y range: {verts_init[:, 1].min().item():.3f} to {verts_init[:, 1].max().item():.3f}")
@@ -139,18 +141,26 @@ class DisplacementMLP(nn.Module):
             nn.ReLU(),
             nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Linear(128, 3),
+            nn.Linear(128, 1),
             nn.Tanh()
         )
 
-    def forward(self, verts):
+    def forward(self, verts, normals):
         encoded = self.enc(verts)
         raw = self.net(encoded)
         y = verts[:, 1:2]
-        torso_mask = (y.abs() < 0.3).float()
+        x = verts[:, 0:1].abs()
+        
+        torso_mask = ((y.abs() < 0.3) & (x < 0.15)).float()
+        arm_mask = ((y.abs() < 0.3) & (x >= 0.15)).float()
         extremity_mask = ((y < -0.38) | (y > 0.42)).float() #feet and head
-        scale = 0.01 * extremity_mask + 0.02 * (1 - torso_mask - extremity_mask).clamp(min=0) + 0.04 * torso_mask
-        return verts + scale * raw
+        
+        
+        scale = (0.01 * extremity_mask 
+                 + 0.01 * arm_mask
+                 + 0.02 * (1 - torso_mask - arm_mask - extremity_mask).clamp(min=0) 
+                 + 0.04 * torso_mask)
+        return verts + scale * raw * normals
 
 
 # ------------------------------- Colour MLP -------------------------------
@@ -270,7 +280,7 @@ for step in range(num_steps):
     colour_optimiser.zero_grad()
 
     #Step 1: get deformed vertices from DisplacementMLP
-    verts = displacement_mlp(verts_init)
+    verts = displacement_mlp(verts_init, verts_normals)
 
     #Step 2: get per-vertex colours from ColourMLP on DEFORMED vertices
     verts_rgb = colour_mlp(verts)
@@ -309,16 +319,17 @@ for step in range(num_steps):
     #colour regularisation
     colour_smooth_loss = colour_smoothness_loss(verts_rgb, faces)
     sat_loss = saturation_loss(verts_rgb)
+    
     sat_weight = 0.05 * (0.3 ** (step / num_steps))  #decay saturation loss weight over time to allow more colour freedom later on
-
-    disp_weight = 8.0 * (0.1 ** (step / num_steps))
+    disp_weight = 8.0 * (0.1 ** (step / num_steps)) #decay displacement regularisation weight
+    colour_smooth_weight = 0.5 * (0.1 ** (step / num_steps))  #decay colour smoothness weight
 
     #Combined loss
     loss = (clip_loss
             + 1.0 * lap_loss
             + disp_weight * disp_loss
             + 0.01 * centroid_loss
-            + 0.1 * colour_smooth_loss
+            + colour_smooth_weight * colour_smooth_loss
             + sat_weight * sat_loss)
 
     loss.backward()
